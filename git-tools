@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.2.9"
+VERSION="1.2.11"
 
 # Цвета для сообщений скрипта; включаются только при выводе в терминал.
 if [[ -t 1 ]]; then
@@ -265,9 +265,25 @@ cmd_pull() {
     info "Изменения получены: $REPO_DIR [$CURRENT_BRANCH]"
 }
 
+# Возвращает "(+a~m-d)" для количества добавленных и удалённых строк;
+# пустая строка, если изменений нет (например, бинарный файл).
+stats_suffix() {
+    local added="$1" deleted="$2" modified=0
+    if (( added < deleted )); then modified="$added"; else modified="$deleted"; fi
+    if (( added + deleted > 0 )); then
+        printf '(+%s~%s-%s)' "$added" "$modified" "$deleted"
+    fi
+}
+
+# Форматирует строку краткого списка: "  путь - Действие(+a~m-d)".
+format_file_line() {
+    local action="$1" path="$2" added="$3" deleted="$4"
+    printf '  %s - %s%s' "$path" "$action" "$(stats_suffix "$added" "$deleted")"
+}
+
 # Формирует короткий заголовок коммита; в режиме full добавляет полный список файлов.
 make_commit_message() {
-    local full="$1" status path old_path
+    local full="$1" status path old_path new_path
     local -a added=() modified=() deleted=() renamed=() other=()
 
     while IFS= read -r -d '' status; do
@@ -289,28 +305,56 @@ make_commit_message() {
         esac
     done < <(git diff --cached --name-status -z)
 
+    # Статистика изменений по файлам: "путь" -> "added deleted".
+    local -A stats=()
+    local added_lines deleted_lines
+    while IFS=$'\t' read -r added_lines deleted_lines path; do
+        [[ "$added_lines" == "-" ]] && added_lines=0
+        [[ "$deleted_lines" == "-" ]] && deleted_lines=0
+        stats["$path"]="$added_lines $deleted_lines"
+    done < <(git diff --cached --numstat)
+
     local a=${#added[@]} m=${#modified[@]} d=${#deleted[@]} r=${#renamed[@]} o=${#other[@]}
     local subject="Update (+$a ~$m -$d >$r)"
     if (( o > 0 )); then subject+=" ?$o"; fi
 
     if [[ "$full" != "yes" ]]; then
+        # Краткий режим: плоский список "файл - Действие(+a~m-d)".
         local total=$(( a + m + d + r + o ))
         if (( total >= 1 && total <= 3 )); then
-            local body="" item
+            local body="" item st old_st new_st
             if (( a )); then
-                for item in "${added[@]}"; do body+="  $item - Added"$'\n'; done
+                for item in "${added[@]}"; do
+                    st="${stats["$item"]:-0 0}"
+                    body+="$(format_file_line Added "$item" "${st% *}" "${st#* }")"$'\n'
+                done
             fi
             if (( m )); then
-                for item in "${modified[@]}"; do body+="  $item - Changed"$'\n'; done
+                for item in "${modified[@]}"; do
+                    st="${stats["$item"]:-0 0}"
+                    body+="$(format_file_line Changed "$item" "${st% *}" "${st#* }")"$'\n'
+                done
             fi
             if (( d )); then
-                for item in "${deleted[@]}"; do body+="  $item - Deleted"$'\n'; done
+                for item in "${deleted[@]}"; do
+                    st="${stats["$item"]:-0 0}"
+                    body+="$(format_file_line Deleted "$item" "${st% *}" "${st#* }")"$'\n'
+                done
             fi
             if (( r )); then
-                for item in "${renamed[@]}"; do body+="  $item - Renamed"$'\n'; done
+                for item in "${renamed[@]}"; do
+                    old_path="${item% → *}"
+                    new_path="${item#* → }"
+                    old_st="${stats["$old_path"]:-0 0}"
+                    new_st="${stats["$new_path"]:-0 0}"
+                    body+="$(format_file_line Renamed "$item" "${new_st% *}" "${old_st#* }")"$'\n'
+                done
             fi
             if (( o )); then
-                for item in "${other[@]}"; do body+="  $item - Other"$'\n'; done
+                for item in "${other[@]}"; do
+                    st="${stats["${item#*:}"]:-0 0}"
+                    body+="$(format_file_line Other "$item" "${st% *}" "${st#* }")"$'\n'
+                done
             fi
             printf '%s\n%s' "$subject" "${body%$'\n'}"
             return
@@ -319,22 +363,45 @@ make_commit_message() {
         return
     fi
 
-    local body=""
-    local item
+    # Полный режим: сгруппированный список по типам изменений.
+    local body="" item st old_st new_st
     if (( a )); then
-        for item in "${added[@]}"; do body+="  $item - Added"$'\n'; done
+        body+="+ Added ($a)"$'\n'
+        for item in "${added[@]}"; do
+            st="${stats["$item"]:-0 0}"
+            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
+        done
     fi
     if (( m )); then
-        for item in "${modified[@]}"; do body+="  $item - Changed"$'\n'; done
+        body+="~ Changed ($m)"$'\n'
+        for item in "${modified[@]}"; do
+            st="${stats["$item"]:-0 0}"
+            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
+        done
     fi
     if (( d )); then
-        for item in "${deleted[@]}"; do body+="  $item - Deleted"$'\n'; done
+        body+="- Deleted ($d)"$'\n'
+        for item in "${deleted[@]}"; do
+            st="${stats["$item"]:-0 0}"
+            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
+        done
     fi
     if (( r )); then
-        for item in "${renamed[@]}"; do body+="  $item - Renamed"$'\n'; done
+        body+="> Renamed ($r)"$'\n'
+        for item in "${renamed[@]}"; do
+            old_path="${item% → *}"
+            new_path="${item#* → }"
+            old_st="${stats["$old_path"]:-0 0}"
+            new_st="${stats["$new_path"]:-0 0}"
+            body+="  $item$(stats_suffix "${new_st% *}" "${old_st#* }")"$'\n'
+        done
     fi
     if (( o )); then
-        for item in "${other[@]}"; do body+="  $item - Other"$'\n'; done
+        body+="? Other ($o)"$'\n'
+        for item in "${other[@]}"; do
+            st="${stats["${item#*:}"]:-0 0}"
+            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
+        done
     fi
     printf '%s\n\n%s' "$subject" "${body%$'\n'}"
 }
