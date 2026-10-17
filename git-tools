@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.2.7"
+VERSION="1.2.9"
 
 # Цвета для сообщений скрипта; включаются только при выводе в терминал.
 if [[ -t 1 ]]; then
-    C_INFO="\033[1;32m"   # зелёный
-    C_WARN="\033[1;33m"   # жёлтый
-    C_ERR="\033[1;31m"    # красный
+    C_INFO="\033[32m"   # зелёный
+    C_WARN="\033[33m"   # жёлтый
+    C_ERR="\033[31m"    # красный
     C_RESET="\033[0m"
 else
     C_INFO=""; C_WARN=""; C_ERR=""; C_RESET=""
