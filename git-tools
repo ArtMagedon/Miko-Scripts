@@ -294,6 +294,27 @@ make_commit_message() {
     if (( o > 0 )); then subject+=" ?$o"; fi
 
     if [[ "$full" != "yes" ]]; then
+        local total=$(( a + m + d + r + o ))
+        if (( total >= 1 && total <= 3 )); then
+            local body="" item
+            if (( a )); then
+                for item in "${added[@]}"; do body+="  + $item"$'\n'; done
+            fi
+            if (( m )); then
+                for item in "${modified[@]}"; do body+="  ~ $item"$'\n'; done
+            fi
+            if (( d )); then
+                for item in "${deleted[@]}"; do body+="  - $item"$'\n'; done
+            fi
+            if (( r )); then
+                for item in "${renamed[@]}"; do body+="  > $item"$'\n'; done
+            fi
+            if (( o )); then
+                for item in "${other[@]}"; do body+="  ? $item"$'\n'; done
+            fi
+            printf '%s\n%s' "$subject" "${body%$'\n'}"
+            return
+        fi
         printf '%s' "$subject"
         return
     fi
@@ -321,6 +342,13 @@ make_commit_message() {
         for item in "${other[@]}"; do body+="  $item"$'\n'; done
     fi
     printf '%s\n\n%s' "$subject" "${body%$'\n'}"
+}
+
+# Возвращает только короткий заголовок коммита (первую строку сообщения).
+make_commit_subject() {
+    local message
+    message="$(make_commit_message no)"
+    printf '%s' "${message%%$'\n'*}"
 }
 
 parse_repo_mode() {
@@ -368,12 +396,16 @@ commit_pending_changes() {
         return 0
     fi
     if [[ -z "$message" ]]; then
-        if [[ "$prompt" == "yes" ]]; then
+        if [[ "$full" == "yes" ]]; then
+            generated="$(make_commit_subject)"
+        else
             generated="$(make_commit_message no)"
+        fi
+        if [[ "$prompt" == "yes" ]]; then
             read -r -p "Текст коммита (\"$generated\"): " message || true
         fi
         if [[ -z "$message" ]]; then
-            message="$(make_commit_message no)"
+            message="$generated"
             auto="yes"
         fi
     fi
