@@ -298,19 +298,19 @@ make_commit_message() {
         if (( total >= 1 && total <= 3 )); then
             local body="" item
             if (( a )); then
-                for item in "${added[@]}"; do body+="  + $item"$'\n'; done
+                for item in "${added[@]}"; do body+="  $item - Added"$'\n'; done
             fi
             if (( m )); then
-                for item in "${modified[@]}"; do body+="  ~ $item"$'\n'; done
+                for item in "${modified[@]}"; do body+="  $item - Changed"$'\n'; done
             fi
             if (( d )); then
-                for item in "${deleted[@]}"; do body+="  - $item"$'\n'; done
+                for item in "${deleted[@]}"; do body+="  $item - Deleted"$'\n'; done
             fi
             if (( r )); then
-                for item in "${renamed[@]}"; do body+="  > $item"$'\n'; done
+                for item in "${renamed[@]}"; do body+="  $item - Renamed"$'\n'; done
             fi
             if (( o )); then
-                for item in "${other[@]}"; do body+="  ? $item"$'\n'; done
+                for item in "${other[@]}"; do body+="  $item - Other"$'\n'; done
             fi
             printf '%s\n%s' "$subject" "${body%$'\n'}"
             return
@@ -322,24 +322,19 @@ make_commit_message() {
     local body=""
     local item
     if (( a )); then
-        body+="+ Added ($a)"$'\n'
-        for item in "${added[@]}"; do body+="  $item"$'\n'; done
+        for item in "${added[@]}"; do body+="  $item - Added"$'\n'; done
     fi
     if (( m )); then
-        body+="~ Modified ($m)"$'\n'
-        for item in "${modified[@]}"; do body+="  $item"$'\n'; done
+        for item in "${modified[@]}"; do body+="  $item - Changed"$'\n'; done
     fi
     if (( d )); then
-        body+="- Deleted ($d)"$'\n'
-        for item in "${deleted[@]}"; do body+="  $item"$'\n'; done
+        for item in "${deleted[@]}"; do body+="  $item - Deleted"$'\n'; done
     fi
     if (( r )); then
-        body+="> Renamed ($r)"$'\n'
-        for item in "${renamed[@]}"; do body+="  $item"$'\n'; done
+        for item in "${renamed[@]}"; do body+="  $item - Renamed"$'\n'; done
     fi
     if (( o )); then
-        body+="? Other ($o)"$'\n'
-        for item in "${other[@]}"; do body+="  $item"$'\n'; done
+        for item in "${other[@]}"; do body+="  $item - Other"$'\n'; done
     fi
     printf '%s\n\n%s' "$subject" "${body%$'\n'}"
 }
