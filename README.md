@@ -76,7 +76,13 @@ git-tools help
 Помести исполняемый файл `git-tools` в каталог скриптов, например `~/Scripts/Miko/`, затем выполни:
 
 ```bash
-chmod +x ~/Scripts/Miko/git-tools
+chmod +x ~/Scripts/Miko/git-tools 
+```
+
+Рекомендуется создать символическую ссылку
+
+```
+ln -s "$(which git-tools)" ~/.local/bin/gt
 ```
 
 Если каталог добавлен в `PATH`, проверь работу команды:

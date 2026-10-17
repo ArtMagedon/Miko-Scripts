@@ -10,7 +10,7 @@ die()   { error "$*"; exit 1; }
 
 usage() {
     cat <<'EOF'
-git-tools — набор личных Git-утилит
+git-tools — набор Git-утилит
 
 Использование:
   git-tools help
