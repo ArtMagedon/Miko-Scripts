@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+set -u
+
+read -r -p $'dir:\t ' dir
+read -r -p 'replace: ' replace
+read -r -p $'to:\t ' to
+
+# Проверка существования каталога
+if [[ ! -d "$dir" ]]; then
+    printf 'Ошибка: каталог не существует: %s\n' "$dir" >&2
+    exit 1
+fi
+
+# Получение абсолютного пути
+if ! dir="$(cd -- "$dir" && pwd -P)"; then
+    printf 'Ошибка: не удалось открыть каталог.\n' >&2
+    exit 1
+fi
+
+# Включение обработки скрытых файлов
+shopt -s dotglob nullglob
+
+# Буквальная замена всех вхождений подстроки
+replace_literal() {
+    local input="$1"
+    local search="$2"
+    local replacement="$3"
+    local prefix
+
+    REPLY=""
+
+    if [[ -z "$search" ]]; then
+        REPLY="$input"
+        return
+    fi
+
+    while [[ "$input" == *"$search"* ]]; do
+        prefix="${input%%"$search"*}"
+        REPLY+="${prefix}${replacement}"
+        input="${input#*"$search"}"
+    done
+
+    REPLY+="$input"
+}
+
+# Обработка файлов и подкаталогов основного каталога
+for entry in "$dir"/*; do
+
+    # Перемещение файлов из подкаталогов
+    if [[ -d "$entry" ]]; then
+
+        # Название исходного подкаталога
+        folder="${entry##*/}"
+
+        # Обработка файлов непосредственно внутри подкаталога
+        for file in "$entry"/*; do
+
+            [[ -f "$file" ]] || continue
+
+            # Исходное имя файла
+            filename="${file##*/}"
+
+            # Добавление имени подкаталога
+            newname="${folder}_${filename}"
+
+            # Замена подстроки в новом имени
+            if [[ -n "$replace" ]]; then
+                replace_literal "$newname" "$replace" "$to"
+                newname="$REPLY"
+            fi
+
+            # Конечный путь находится в основном каталоге
+            nfile="$dir/$newname"
+
+            # Проверка существования целевого файла
+            if [[ -e "$nfile" || -L "$nfile" ]]; then
+                printf 'Пропуск: файл уже существует: %s\n' "$nfile" >&2
+                continue
+            fi
+
+            # Вывод исходного и конечного путей
+            printf '%s => %s\n' "$file" "$nfile"
+
+            # Перемещение и переименование файла
+            if ! mv -- "$file" "$nfile"; then
+                printf 'Ошибка перемещения: %s\n' "$file" >&2
+            fi
+
+        done
+
+        # Удаление подкаталога, если он опустел
+        rmdir -- "$entry" 2>/dev/null || true
+
+    # Обработка файлов основного каталога
+    elif [[ -f "$entry" ]]; then
+
+        filename="${entry##*/}"
+        newname="$filename"
+
+        # Замена подстроки в имени файла
+        if [[ -n "$replace" ]]; then
+            replace_literal "$newname" "$replace" "$to"
+            newname="$REPLY"
+        fi
+
+        # Формирование конечного пути
+        nfile="$dir/$newname"
+
+        # Если имя не изменилось, пропускаем файл
+        [[ "$entry" != "$nfile" ]] || continue
+
+        # Защита от перезаписи существующих файлов
+        if [[ -e "$nfile" || -L "$nfile" ]]; then
+            printf 'Пропуск: файл уже существует: %s\n' "$nfile" >&2
+            continue
+        fi
+
+        printf '%s => %s\n' "$entry" "$nfile"
+
+        # Переименование файла
+        if ! mv -- "$entry" "$nfile"; then
+            printf 'Ошибка переименования: %s\n' "$entry" >&2
+        fi
+
+    fi
+
+done

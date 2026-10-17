@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+VERSION="1.2.0"
+
+info()  { printf 'INFO: %s\n' "$*"; }
+warn()  { printf 'Внимание: %s\n' "$*" >&2; }
+error() { printf 'Ошибка: %s\n' "$*" >&2; }
+die()   { error "$*"; exit 1; }
+
+usage() {
+    cat <<'EOF'
+git-tools — набор личных Git-утилит
+
+Использование:
+  git-tools help
+  git-tools version
+  git-tools create [путь] [URL] [--pull|--no-pull]
+  git-tools config [имя] [email]
+  git-tools ssh [--comment КОММЕНТАРИЙ] [--no-passphrase]
+  git-tools pull [путь]
+  git-tools push [путь] [full]
+  git-tools sync [путь] [full]
+  git-tools status [путь]
+
+Примеры:
+  git-tools create
+  git-tools create Projects/site git@github.com:user/site.git --no-pull
+  git-tools config
+  git-tools config "Artem Example" artem@example.com
+  git-tools ssh --comment artem@example.com
+  git-tools ssh --comment artem@example.com --no-passphrase
+  git-tools sync "$HOME/Projects/site"
+
+Если для create или config передан только один из аргументов, скрипт
+запросит только недостающие данные. Без аргументов команды работают
+интерактивно. Параметры pull/push/sync/status принимают путь к репозиторию. Для push и sync
+можно добавить --full, чтобы включить в коммит список всех изменённых файлов.
+EOF
+}
+
+need_command() {
+    command -v "$1" >/dev/null 2>&1 || die "Не найдена необходимая команда: $1"
+}
+
+confirm() {
+    local prompt="$1" answer
+    read -r -p "$prompt [y/N]: " answer
+    [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
+}
+
+resolve_repo() {
+    local requested="${1:-.}"
+    need_command realpath
+    REPO_DIR="$(realpath -- "$requested")"
+    [[ -d "$REPO_DIR" ]] || die "Каталог не существует: $REPO_DIR"
+    cd -- "$REPO_DIR"
+    git rev-parse --show-toplevel >/dev/null 2>&1 || die "Это не Git-репозиторий: $REPO_DIR"
+    REPO_DIR="$(git rev-parse --show-toplevel)"
+    cd -- "$REPO_DIR"
+}
+
+require_origin() {
+    git remote get-url origin >/dev/null 2>&1 || die "Не настроен удалённый репозиторий 'origin'."
+}
+
+current_branch() {
+    CURRENT_BRANCH="$(git branch --show-current)"
+    [[ -n "$CURRENT_BRANCH" ]] || die "Не удалось определить текущую ветку. Возможно, репозиторий ещё не содержит коммитов."
+}
+
+cmd_create() {
+    need_command git
+    local repo_path="${1:-}" remote_url="" pull_mode="ask" arg
+    shift 2>/dev/null || true
+
+    # Опции можно передавать после позиционных аргументов.
+    for arg in "$@"; do
+        case "$arg" in
+            --pull) pull_mode="yes" ;;
+            --no-pull) pull_mode="no" ;;
+            *) die "Неизвестная опция create: $arg" ;;
+        esac
+    done
+
+    # Второй исходный аргумент — URL. Сохраняем его до shift в отдельной логике ниже.
+    # Для корректной обработки позиционных параметров они считываются из исходного argv
+    # до вызова этой функции в dispatcher.
+    :
+}
+
+cmd_create_impl() {
+    need_command git
+    local repo_path="${1:-}" remote_url="${2:-}" pull_mode="ask"
+    shift $(( $# >= 2 ? 2 : $# )) || true
+
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --pull) pull_mode="yes" ;;
+            --no-pull) pull_mode="no" ;;
+            *) die "Неизвестная опция create: $arg" ;;
+        esac
+    done
+
+    if [[ -z "$repo_path" ]]; then
+        read -r -p "Путь к новому репозиторию (например, Projects/site): " repo_path
+    fi
+    [[ -n "$repo_path" ]] || die "Путь не может быть пустым."
+
+    if [[ "$repo_path" == "~/"* ]]; then
+        repo_path="$HOME/${repo_path#~/}"
+    elif [[ "$repo_path" != /* ]]; then
+        repo_path="$HOME/$repo_path"
+    fi
+    repo_path="$(realpath -m -- "$repo_path")"
+    [[ "$repo_path" != "$HOME" ]] || die "Нельзя использовать домашнюю директорию как новый репозиторий."
+    [[ ! -e "$repo_path" ]] || die "Путь уже существует: $repo_path"
+
+    if [[ -z "$remote_url" ]]; then
+        read -r -p "URL удалённого репозитория: " remote_url
+    fi
+    [[ -n "$remote_url" ]] || die "URL не может быть пустым."
+
+    mkdir -p -- "$(dirname -- "$repo_path")"
+    mkdir -- "$repo_path"
+    cd -- "$repo_path"
+
+    git init
+    git branch -M main
+    git remote add origin "$remote_url"
+
+    printf '\nЛокальный репозиторий создан: %s\nУдалённый адрес: %s\n' "$repo_path" "$remote_url"
+
+    case "$pull_mode" in
+        yes) git pull --ff-only origin main ;;
+        no) info "Загрузка удалённой ветки пропущена." ;;
+        ask)
+            if confirm "Попробовать загрузить удалённую ветку main сейчас?"; then
+                git pull --ff-only origin main || {
+                    warn "Репозиторий создан, но pull не выполнен. Проверь удалённую ветку и её историю."
+                    return 1
+                }
+            fi
+            ;;
+    esac
+}
+
+cmd_config() {
+    need_command git
+    local name="${1:-}" email="${2:-}" old_name old_email
+    old_name="$(git config --global --get user.name || true)"
+    old_email="$(git config --global --get user.email || true)"
+
+    if [[ -z "$name" && -z "$email" ]]; then
+        printf 'Текущие глобальные настройки Git:\n  Имя: %s\n  Email: %s\n\n' \
+            "${old_name:-не задано}" "${old_email:-не задано}"
+        confirm "Изменить настройки?" || { info "Настройки не изменены."; return 0; }
+    fi
+
+    if [[ -z "$name" ]]; then
+        read -r -p "Имя [${old_name}]: " name
+        name="${name:-$old_name}"
+    fi
+    if [[ -z "$email" ]]; then
+        read -r -p "Email [${old_email}]: " email
+        email="${email:-$old_email}"
+    fi
+
+    [[ -n "$name" ]] || die "Имя не задано."
+    [[ -n "$email" ]] || die "Email не задан."
+
+    git config --global user.name "$name"
+    git config --global user.email "$email"
+    info "Глобальные настройки Git обновлены."
+    printf '  Имя: %s\n  Email: %s\n' "$name" "$email"
+}
+
+cmd_ssh() {
+    local comment="" no_passphrase="no"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --comment)
+                [[ $# -ge 2 && -n "$2" ]] || die "После --comment укажи комментарий, например email."
+                comment="$2"; shift 2 ;;
+            --no-passphrase)
+                no_passphrase="yes"; shift ;;
+            -h|--help)
+                printf 'Использование: git-tools ssh [--comment КОММЕНТАРИЙ] [--no-passphrase]\n'
+                return 0 ;;
+            *) die "Неизвестная опция ssh: $1" ;;
+        esac
+    done
+
+    if ! command -v git >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+        info "Устанавливаю Git и OpenSSH Client..."
+        need_command sudo
+        sudo apt update
+        sudo apt install -y git openssh-client
+    fi
+
+    mkdir -p -- "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+    local key="$HOME/.ssh/personal_key" pub="$HOME/.ssh/personal_key.pub" config="$HOME/.ssh/config"
+
+    if [[ -e "$key" || -e "$pub" ]]; then
+        [[ -f "$key" && -f "$pub" ]] || die "Найден только один файл ключа. Не перезаписываю существующие файлы."
+        info "SSH-ключ уже существует: $key"
+    else
+        if [[ -z "$comment" ]]; then
+            read -r -p "Комментарий для нового ключа (обычно email): " comment
+        fi
+        if [[ "$no_passphrase" == "yes" ]]; then
+            ssh-keygen -t ed25519 -C "$comment" -f "$key" -N ""
+        else
+            # Passphrase намеренно не принимается через аргумент командной строки,
+            # поскольку аргументы могут сохраняться в истории shell и быть видимы процессам.
+            ssh-keygen -t ed25519 -C "$comment" -f "$key"
+        fi
+    fi
+
+    touch "$config"
+    chmod 600 "$config"
+    if ! grep -qE '^[[:space:]]*Host[[:space:]]+github\.com([[:space:]]|$)' "$config"; then
+        cat >> "$config" <<'EOF'
+
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/personal_key
+    IdentitiesOnly yes
+EOF
+        info "Настройка github.com добавлена в ~/.ssh/config."
+    else
+        warn "Запись Host github.com уже есть; она не изменена автоматически."
+        warn "Проверь, что в ней указан IdentityFile ~/.ssh/personal_key."
+    fi
+
+    printf '\nПубличный ключ — добавь его в GitHub → Settings → SSH and GPG keys:\n'
+    cat "$pub"
+}
+
+cmd_pull() {
+    need_command git
+    resolve_repo "${1:-.}"
+    require_origin
+    current_branch
+    [[ -z "$(git status --porcelain)" ]] || die "Есть незакоммиченные изменения. Сохрани их или отмени перед pull."
+    info "Получаю изменения: $REPO_DIR [$CURRENT_BRANCH]"
+    git pull --ff-only origin "$CURRENT_BRANCH"
+}
+
+# Формирует короткий заголовок коммита; в режиме full добавляет полный список файлов.
+make_commit_message() {
+    local full="$1" status path old_path
+    local -a added=() modified=() deleted=() renamed=() other=()
+
+    while IFS= read -r -d '' status; do
+        case "$status" in
+            R*|C*)
+                IFS= read -r -d '' old_path || break
+                IFS= read -r -d '' path || break
+                renamed+=("$old_path → $path")
+                ;;
+            *)
+                IFS= read -r -d '' path || break
+                case "$status" in
+                    A) added+=("$path") ;;
+                    D) deleted+=("$path") ;;
+                    M|T|U) modified+=("$path") ;;
+                    *) other+=("$status:$path") ;;
+                esac
+                ;;
+        esac
+    done < <(git diff --cached --name-status -z)
+
+    local a=${#added[@]} m=${#modified[@]} d=${#deleted[@]} r=${#renamed[@]} o=${#other[@]}
+    local subject="Update (+$a ~$m -$d >$r)"
+    if (( o > 0 )); then subject+=" ?$o"; fi
+
+    if [[ "$full" != "yes" ]]; then
+        printf '%s' "$subject"
+        return
+    fi
+
+    local body=""
+    local item
+    if (( a )); then
+        body+="+ Added ($a)"$'\n'
+        for item in "${added[@]}"; do body+="  $item"$'\n'; done
+    fi
+    if (( m )); then
+        body+="~ Modified ($m)"$'\n'
+        for item in "${modified[@]}"; do body+="  $item"$'\n'; done
+    fi
+    if (( d )); then
+        body+="- Deleted ($d)"$'\n'
+        for item in "${deleted[@]}"; do body+="  $item"$'\n'; done
+    fi
+    if (( r )); then
+        body+="> Renamed ($r)"$'\n'
+        for item in "${renamed[@]}"; do body+="  $item"$'\n'; done
+    fi
+    if (( o )); then
+        body+="? Other ($o)"$'\n'
+        for item in "${other[@]}"; do body+="  $item"$'\n'; done
+    fi
+    printf '%s\n\n%s' "$subject" "${body%$'\n'}"
+}
+
+parse_repo_mode() {
+    # Sets ACTION_REPO and ACTION_FULL. Supports: command [path] [full]
+    # and command full (current directory).
+    ACTION_REPO="."
+    ACTION_FULL="no"
+    if [[ $# -gt 2 ]]; then die "Слишком много аргументов: используйте [путь] [full]."; fi
+    if [[ $# -ge 1 ]]; then
+        if [[ "$1" == "--full" ]]; then
+            ACTION_FULL="yes"
+            [[ $# -eq 1 ]] || die "После full нельзя указывать путь. Используйте команду [путь] [full]."
+        else
+            ACTION_REPO="$1"
+        fi
+    fi
+    if [[ $# -eq 2 ]]; then
+        [[ "$2" == "--full" ]] || die "Неизвестный режим: $2 (допустим только full)."
+        ACTION_FULL="yes"
+    fi
+}
+
+commit_pending_changes() {
+    local full="$1" message
+    git add -A
+    if git diff --cached --quiet; then
+        info "Нет изменений для нового коммита."
+        return 0
+    fi
+    message="$(make_commit_message no)"
+    info "Создаю коммит: $message"
+    if [[ "$full" == "yes" ]]; then
+        git commit -m "$message" -m "$(make_commit_message_body_placeholder)"
+    else
+        git commit -m "$message"
+    fi
+}
+
+# Возвращает тело коммита в режиме full; отдельно от заголовка, чтобы Git
+# корректно сохранил заголовок и подробности в разных частях сообщения.
+make_commit_message_body_placeholder() {
+    local message
+    message="$(make_commit_message yes)"
+    # Убираем первую строку-заголовок и пустую строку после неё.
+    printf '%s' "${message#*$'\n\n'}"
+}
+
+cmd_push() {
+    need_command git
+    parse_repo_mode "$@"
+    resolve_repo "$ACTION_REPO"
+    require_origin
+    current_branch
+
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Обнаружены локальные изменения:"
+        git status --short
+        commit_pending_changes "$ACTION_FULL"
+    fi
+
+    info "Отправляю изменения: $REPO_DIR [$CURRENT_BRANCH]"
+    git push -u origin "$CURRENT_BRANCH"
+}
+
+cmd_sync() {
+    need_command git
+    parse_repo_mode "$@"
+    resolve_repo "$ACTION_REPO"
+    require_origin
+    current_branch
+
+    info "Репозиторий: $REPO_DIR"
+    info "Ветка: $CURRENT_BRANCH"
+    git fetch origin "$CURRENT_BRANCH"
+    local remote_ref="origin/$CURRENT_BRANCH"
+    git rev-parse --verify "$remote_ref" >/dev/null 2>&1 || die "Удалённая ветка $remote_ref не найдена."
+
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Обнаружены незакоммиченные изменения:"
+        git status --short
+        commit_pending_changes "$ACTION_FULL"
+        git fetch origin "$CURRENT_BRANCH"
+        git rev-parse --verify "$remote_ref" >/dev/null 2>&1 || die "Удалённая ветка $remote_ref не найдена."
+    fi
+
+    local ahead behind
+    ahead="$(git rev-list --count "$remote_ref..HEAD")"
+    behind="$(git rev-list --count "HEAD..$remote_ref")"
+
+    if [[ "$ahead" -eq 0 && "$behind" -eq 0 ]]; then
+        info "Репозиторий уже синхронизирован."
+    elif [[ "$ahead" -gt 0 && "$behind" -eq 0 ]]; then
+        info "Локальная ветка впереди на $ahead комм. Отправляю изменения."
+        git push -u origin "$CURRENT_BRANCH"
+    elif [[ "$ahead" -eq 0 && "$behind" -gt 0 ]]; then
+        info "Удалённая ветка впереди на $behind комм. Загружаю изменения."
+        git pull --ff-only origin "$CURRENT_BRANCH"
+    else
+        die "Ветки разошлись: локальных коммитов впереди — $ahead, удалённых — $behind. Разреши расхождение вручную."
+    fi
+}
+
+cmd_status() {
+    need_command git
+    resolve_repo "${1:-.}"
+    printf 'Репозиторий: %s\n' "$REPO_DIR"
+    printf 'Ветка: %s\n' "$(git branch --show-current || true)"
+    printf 'Удалённые репозитории:\n'
+    git remote -v || true
+    printf '\nСостояние:\n'
+    git status --short --branch
+}
+
+main() {
+    local command="${1:-help}"
+    shift || true
+    case "$command" in
+        help|-h|--help) usage ;;
+        version|-v|--version) printf 'git-tools %s\n' "$VERSION" ;;
+        create) cmd_create_impl "$@" ;;
+        config) [[ $# -le 2 ]] || die "Использование: git-tools config [имя] [email]"; cmd_config "$@" ;;
+        ssh) cmd_ssh "$@" ;;
+        pull) [[ $# -le 1 ]] || die "Использование: git-tools pull [путь]"; cmd_pull "$@" ;;
+        push) [[ $# -le 2 ]] || die "Использование: git-tools push [путь] [full]"; cmd_push "$@" ;;
+        sync) [[ $# -le 2 ]] || die "Использование: git-tools sync [путь] [full]"; cmd_sync "$@" ;;
+        status) [[ $# -le 1 ]] || die "Использование: git-tools status [путь]"; cmd_status "$@" ;;
+        *) usage >&2; die "Неизвестная команда: $command" ;;
+    esac
+}
+
+main "$@"
