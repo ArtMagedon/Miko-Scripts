@@ -281,6 +281,61 @@ format_file_line() {
     printf '  %s - %s%s' "$path" "$action" "$(stats_suffix "$added" "$deleted")"
 }
 
+# Собирает строки "объём|текст" для группы файлов.
+# mode: normal — статистика по пути; rename — комбинирование старого/нового пути;
+#       other — путь берётся после префикса "статус:".
+build_group_items() {
+    local -n _items="$1" _files="$2" _stats="$3"
+    local mode="$4" item st old_st new_st old_path new_path
+    local added_lines deleted_lines modified_lines volume
+    _items=()
+    for item in "${_files[@]}"; do
+        if [[ "$mode" == "rename" ]]; then
+            old_path="${item% → *}"
+            new_path="${item#* → }"
+            old_st="${_stats["$old_path"]:-0 0}"
+            new_st="${_stats["$new_path"]:-0 0}"
+            added_lines="${new_st% *}"
+            deleted_lines="${old_st#* }"
+        else
+            if [[ "$mode" == "other" ]]; then
+                st="${_stats["${item#*:}"]:-0 0}"
+            else
+                st="${_stats["$item"]:-0 0}"
+            fi
+            added_lines="${st% *}"
+            deleted_lines="${st#* }"
+        fi
+        if (( added_lines < deleted_lines )); then modified_lines="$added_lines"; else modified_lines="$deleted_lines"; fi
+        volume=$(( added_lines + deleted_lines + modified_lines ))
+        _items+=("$volume|$item$(stats_suffix "$added_lines" "$deleted_lines")")
+    done
+}
+
+# Сортирует строки "объём|текст" по убыванию объёма, оставляет не более 10,
+# добавляет "And N more" и дописывает секцию в body.
+append_sorted_group() {
+    local -n _body="$1"
+    local marker="$2" action="$3"
+    shift 3
+    local -a items=("$@")
+    (( ${#items[@]} )) || return 0
+    _body+="$marker $action (${#items[@]})"$'\n'
+    local sorted line text count=0
+    sorted="$(printf '%s\n' "${items[@]}" | sort -t'|' -k1,1rn -s)"
+    while IFS= read -r line; do
+        if (( count >= 10 )); then
+            break
+        fi
+        text="${line#*|}"
+        _body+="  $text"$'\n'
+        (( count++ ))
+    done <<< "$sorted"
+    if (( ${#items[@]} > 10 )); then
+        _body+="  And $(( ${#items[@]} - 10 )) more"$'\n'
+    fi
+}
+
 # Формирует короткий заголовок коммита; в режиме full добавляет полный список файлов.
 make_commit_message() {
     local full="$1" status path old_path new_path
@@ -363,45 +418,29 @@ make_commit_message() {
         return
     fi
 
-    # Полный режим: сгруппированный список по типам изменений.
+    # Полный режим: сгруппированный список по типам изменений,
+    # внутри группы сортировка по объёму изменений, не более 10 файлов.
     local body="" item st old_st new_st
+    local -a items=()
     if (( a )); then
-        body+="+ Added ($a)"$'\n'
-        for item in "${added[@]}"; do
-            st="${stats["$item"]:-0 0}"
-            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
-        done
+        build_group_items items added stats normal
+        append_sorted_group body "+" "Added" "${items[@]}"
     fi
     if (( m )); then
-        body+="~ Changed ($m)"$'\n'
-        for item in "${modified[@]}"; do
-            st="${stats["$item"]:-0 0}"
-            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
-        done
+        build_group_items items modified stats normal
+        append_sorted_group body "~" "Changed" "${items[@]}"
     fi
     if (( d )); then
-        body+="- Deleted ($d)"$'\n'
-        for item in "${deleted[@]}"; do
-            st="${stats["$item"]:-0 0}"
-            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
-        done
+        build_group_items items deleted stats normal
+        append_sorted_group body "-" "Deleted" "${items[@]}"
     fi
     if (( r )); then
-        body+="> Renamed ($r)"$'\n'
-        for item in "${renamed[@]}"; do
-            old_path="${item% → *}"
-            new_path="${item#* → }"
-            old_st="${stats["$old_path"]:-0 0}"
-            new_st="${stats["$new_path"]:-0 0}"
-            body+="  $item$(stats_suffix "${new_st% *}" "${old_st#* }")"$'\n'
-        done
+        build_group_items items renamed stats rename
+        append_sorted_group body ">" "Renamed" "${items[@]}"
     fi
     if (( o )); then
-        body+="? Other ($o)"$'\n'
-        for item in "${other[@]}"; do
-            st="${stats["${item#*:}"]:-0 0}"
-            body+="  $item$(stats_suffix "${st% *}" "${st#* }")"$'\n'
-        done
+        build_group_items items other stats other
+        append_sorted_group body "?" "Other" "${items[@]}"
     fi
     printf '%s\n\n%s' "$subject" "${body%$'\n'}"
 }
