@@ -5,7 +5,7 @@ VERSION="1.2.9"
 
 # Цвета для сообщений скрипта; включаются только при выводе в терминал.
 if [[ -t 1 ]]; then
-    C_INFO="\033[32m"   # зелёный
+    C_INFO="\033[36m"   # зелёный
     C_WARN="\033[33m"   # жёлтый
     C_ERR="\033[31m"    # красный
     C_RESET="\033[0m"
@@ -262,6 +262,7 @@ cmd_pull() {
     [[ -z "$(git status --porcelain)" ]] || die "Есть незакоммиченные изменения. Сохрани их или отмени перед pull."
     info "Получаю изменения: $REPO_DIR [$CURRENT_BRANCH]"
     git pull --ff-only origin "$CURRENT_BRANCH"
+    info "Изменения получены: $REPO_DIR [$CURRENT_BRANCH]"
 }
 
 # Формирует короткий заголовок коммита; в режиме full добавляет полный список файлов.
@@ -408,6 +409,7 @@ cmd_push() {
 
     info "Отправляю изменения: $REPO_DIR [$CURRENT_BRANCH]"
     git push -u origin "$CURRENT_BRANCH"
+    info "Изменения отправлены: $REPO_DIR [$CURRENT_BRANCH]"
 }
 
 cmd_sync() {
@@ -440,9 +442,11 @@ cmd_sync() {
     elif [[ "$ahead" -gt 0 && "$behind" -eq 0 ]]; then
         info "Локальная ветка впереди на $ahead комм. Отправляю изменения."
         git push -u origin "$CURRENT_BRANCH"
+        info "Изменения отправлены: $REPO_DIR [$CURRENT_BRANCH]"
     elif [[ "$ahead" -eq 0 && "$behind" -gt 0 ]]; then
         info "Удалённая ветка впереди на $behind комм. Загружаю изменения."
         git pull --ff-only origin "$CURRENT_BRANCH"
+        info "Изменения получены: $REPO_DIR [$CURRENT_BRANCH]"
     else
         die "Ветки разошлись: локальных коммитов впереди — $ahead, удалённых — $behind. Разреши расхождение вручную."
     fi
