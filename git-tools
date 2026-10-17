@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.7"
 
 info()  { printf 'INFO: %s\n' "$*"; }
 warn()  { printf 'Внимание: %s\n' "$*" >&2; }
@@ -19,8 +19,8 @@ git-tools — набор Git-утилит
   git-tools config [имя] [email]
   git-tools ssh [--comment КОММЕНТАРИЙ] [--no-passphrase]
   git-tools pull [путь]
-  git-tools push [путь] [full]
-  git-tools sync [путь] [full]
+  git-tools push [путь] [full] [-m сообщение]
+  git-tools sync [путь] [full] [-m сообщение]
   git-tools status [путь]
 
 Примеры:
@@ -31,11 +31,15 @@ git-tools — набор Git-утилит
   git-tools ssh --comment artem@example.com
   git-tools ssh --comment artem@example.com --no-passphrase
   git-tools sync "$HOME/Projects/site"
+  git-tools push -m "Добавил новую функцию"
 
 Если для create или config передан только один из аргументов, скрипт
 запросит только недостающие данные. Без аргументов команды работают
 интерактивно. Параметры pull/push/sync/status принимают путь к репозиторию. Для push и sync
 можно добавить --full, чтобы включить в коммит список всех изменённых файлов.
+Текст коммита для push и sync можно передать через -m/--message или позиционным
+аргументом; если он не задан, push запросит его (пустой ввод сгенерирует
+сообщение автоматически), а sync сгенерирует сообщение без запроса.
 EOF
 }
 
@@ -309,35 +313,61 @@ make_commit_message() {
 }
 
 parse_repo_mode() {
-    # Sets ACTION_REPO and ACTION_FULL. Supports: command [path] [full]
-    # and command full (current directory).
+    # Sets ACTION_REPO, ACTION_FULL and ACTION_MESSAGE.
+    # Supports: command [path] [full] [-m message] and command full (current directory).
     ACTION_REPO="."
     ACTION_FULL="no"
-    if [[ $# -gt 2 ]]; then die "Слишком много аргументов: используйте [путь] [full]."; fi
-    if [[ $# -ge 1 ]]; then
-        if [[ "$1" == "--full" ]]; then
+    ACTION_MESSAGE=""
+    local positional=() arg
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full)
+                ACTION_FULL="yes"
+                shift ;;
+            -m|--message)
+                [[ $# -ge 2 && -n "$2" ]] || die "После $1 укажи текст коммита."
+                ACTION_MESSAGE="$2"
+                shift 2 ;;
+            -*) die "Неизвестная опция: $1" ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+
+    local path_set="no" message_set="no"
+    for arg in "${positional[@]}"; do
+        if [[ "$arg" == "full" || "$arg" == "--full" ]]; then
             ACTION_FULL="yes"
-            [[ $# -eq 1 ]] || die "После full нельзя указывать путь. Используйте команду [путь] [full]."
+        elif [[ "$path_set" == "no" && ( -d "$arg" || "$arg" == */* || "$arg" == "~"* ) ]]; then
+            ACTION_REPO="$arg"
+            path_set="yes"
+        elif [[ "$message_set" == "no" ]]; then
+            ACTION_MESSAGE="$arg"
+            message_set="yes"
         else
-            ACTION_REPO="$1"
+            die "Слишком много аргументов: используйте [путь] [full] [-m сообщение]."
         fi
-    fi
-    if [[ $# -eq 2 ]]; then
-        [[ "$2" == "--full" ]] || die "Неизвестный режим: $2 (допустим только full)."
-        ACTION_FULL="yes"
-    fi
+    done
 }
 
 commit_pending_changes() {
-    local full="$1" message
+    local full="$1" message="$2" prompt="${3:-yes}" generated auto="no"
     git add -A
     if git diff --cached --quiet; then
         info "Нет изменений для нового коммита."
         return 0
     fi
-    message="$(make_commit_message no)"
+    if [[ -z "$message" ]]; then
+        if [[ "$prompt" == "yes" ]]; then
+            generated="$(make_commit_message no)"
+            read -r -p "Текст коммита (\"$generated\"): " message || true
+        fi
+        if [[ -z "$message" ]]; then
+            message="$(make_commit_message no)"
+            auto="yes"
+        fi
+    fi
     info "Создаю коммит: $message"
-    if [[ "$full" == "yes" ]]; then
+    if [[ "$full" == "yes" && "$auto" == "yes" ]]; then
         git commit -m "$message" -m "$(make_commit_message_body_placeholder)"
     else
         git commit -m "$message"
@@ -363,7 +393,7 @@ cmd_push() {
     if [[ -n "$(git status --porcelain)" ]]; then
         echo "Обнаружены локальные изменения:"
         git status --short
-        commit_pending_changes "$ACTION_FULL"
+        commit_pending_changes "$ACTION_FULL" "$ACTION_MESSAGE"
     fi
 
     info "Отправляю изменения: $REPO_DIR [$CURRENT_BRANCH]"
@@ -386,7 +416,7 @@ cmd_sync() {
     if [[ -n "$(git status --porcelain)" ]]; then
         echo "Обнаружены незакоммиченные изменения:"
         git status --short
-        commit_pending_changes "$ACTION_FULL"
+        commit_pending_changes "$ACTION_FULL" "$ACTION_MESSAGE" "no"
         git fetch origin "$CURRENT_BRANCH"
         git rev-parse --verify "$remote_ref" >/dev/null 2>&1 || die "Удалённая ветка $remote_ref не найдена."
     fi
@@ -429,8 +459,8 @@ main() {
         config) [[ $# -le 2 ]] || die "Использование: git-tools config [имя] [email]"; cmd_config "$@" ;;
         ssh) cmd_ssh "$@" ;;
         pull) [[ $# -le 1 ]] || die "Использование: git-tools pull [путь]"; cmd_pull "$@" ;;
-        push) [[ $# -le 2 ]] || die "Использование: git-tools push [путь] [full]"; cmd_push "$@" ;;
-        sync) [[ $# -le 2 ]] || die "Использование: git-tools sync [путь] [full]"; cmd_sync "$@" ;;
+        push) [[ $# -le 4 ]] || die "Использование: git-tools push [путь] [full] [-m сообщение]"; cmd_push "$@" ;;
+        sync) [[ $# -le 4 ]] || die "Использование: git-tools sync [путь] [full] [-m сообщение]"; cmd_sync "$@" ;;
         status) [[ $# -le 1 ]] || die "Использование: git-tools status [путь]"; cmd_status "$@" ;;
         *) usage >&2; die "Неизвестная команда: $command" ;;
     esac
